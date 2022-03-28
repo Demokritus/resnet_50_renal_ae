@@ -11,9 +11,13 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=gsergei@uni-koeln.de
 
-export LATENT_DIM=1024
+LATENT_DIMS=(131072 16384 4096 2048 1024)
+
+export LATENT_DIM=${LATENT_DIMS[2]}
+export MASTER_PORT="9004"
 export N_EPOCHS=1000
-export BATCH_SIZE=8
+export DIM=16
+export BATCH_SIZE=4
 export N_GPUS=1
 export SCALE_FACTOR=1.0
 export LEARNING_R=0.0001
@@ -26,4 +30,4 @@ export workdir=$1
 cd $workdir
 
 python3 train_parallel.py -l $LEARNING_R -s $SCALE_FACTOR -g $N_GPUS -b $BATCH_SIZE -e $N_EPOCHS \
-    -D $DIR_CHECKPOINT -S $LATENT_DIM
+    -D $DIR_CHECKPOINT"_latent_dim_"$LATENT_DIM -f -1 -S $LATENT_DIM -M $MASTER_PORT

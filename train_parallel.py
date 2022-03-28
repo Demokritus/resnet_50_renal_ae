@@ -1,4 +1,6 @@
 import os
+import sys
+import re
 import torch
 import torch.nn as nn # for constructing a neural net class
 from torch.utils.data import DataLoader
@@ -17,24 +19,8 @@ import argparse
 import torch.distributed as dist
 
 
-# First we need to define constants:
 # constants
-NUM_EPOCHS = 1000
-LEARNING_RATE = 5e-4
-BATCH_SIZE = 1
 IMG_SIZE = (512, 512)
-gpu = 0
-
-# latent dimensionalities for the experiments
-dim_powers = list(range(10, 18))
-global latent_dims
-latent_dims = [2 ** x for x in dim_powers]
-
-# image transformations
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Resize(IMG_SIZE)
-])
 
 
 def train(model, train_loader, test_loader, 
@@ -43,7 +29,9 @@ def train(model, train_loader, test_loader,
           learning_rate : float = 5e-4,
           log_dir : str = '/scratch/german/runs/',
           checkpoints_dir :str = '/scratch/german/checkpoints/renal_autoencoder_resnet50_v2',
-         gpu : int = 0):
+         gpu : int = 0,
+         patience : int = 15,
+         latent_dim : int = 1024) -> None:
     torch.manual_seed(42)
     criterion = nn.MSELoss()
     # criterion = nn.BCELoss()
@@ -58,6 +46,8 @@ def train(model, train_loader, test_loader,
     tb_writer = SummaryWriter(log_dir=log_dir + log_name)
     model.train()
 
+    patience_counter : int = 0
+
     for epoch in range(num_epochs):
         comp_loss = 0
         for img, name in train_loader:
@@ -65,12 +55,6 @@ def train(model, train_loader, test_loader,
             if gpu >= 0:
                 img = img.cuda(gpu)
             _, recon = model(img)
-            # print("IMG type: ", type(img))
-            # print("RECON type: ", type(recon))
-            # recon = recon.type(torch.uint8)
-            # img = img.to(torch.int64)
-            # recon = recon.to(torch.int64)
-            # img = torch.tensor(img, dtype=torch.long)
             loss = criterion(recon, img)
             comp_loss += loss.item() * len(img)
             optimizer.zero_grad()
@@ -81,7 +65,9 @@ def train(model, train_loader, test_loader,
 
         if epoch % 5 == 0:
             cross_corr, sum_square_dif, val_loss = validate(model, epoch, tb_writer,
-                                                            test_loader, batch_size=batch_size)
+                                                            test_loader, batch_size=batch_size, 
+                                                            gpu=gpu, 
+                                                            save_dir="renal_encoder_images_lat_dim_"+str(latent_dim))
             print("Validation cross correlation: {:.4f}".format(float(cross_corr)))
             print('Epoch:{}, Loss:{:.4f}'.format(epoch + 1, float(loss)))
 
@@ -90,15 +76,25 @@ def train(model, train_loader, test_loader,
                 torch.save(model.state_dict(), os.path.join(checkpoints_dir,
                                                             "cp_%i.pth" % epoch))
                 old_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                print("Loss stagnating on {0} validation".format(patience_counter))
 
             tb_writer.add_scalar('Loss/train', comp_loss, epoch)
             tb_writer.add_scalar('Loss/validation', val_loss, epoch)
             tb_writer.add_scalar('Cross-correlation/validation', cross_corr, epoch)
             tb_writer.add_scalar('Sum square difference/validation', sum_square_dif, epoch)
+        
+        if patience_counter > patience:
+            print("Early stopping ...")
+            return
 
 
 def validate(model, epoch,
-             tb_writer, test_loader, batch_size=4):
+             tb_writer, test_loader, 
+             batch_size=4, gpu : int = 0,
+             save_dir : str = "renal_encoder_images") -> None:
     model.eval()
     torch.manual_seed(42)
 
@@ -109,6 +105,9 @@ def validate(model, epoch,
     loss = 0
     # if gpu >= 0:
     #    data, target = data.cuda(gpu), target.cuda(gpu)
+
+    if not os.path.isdir(save_dir):
+        os.mkdir(save_dir)
 
     for img, name in test_loader:
         # img, _ = data
@@ -121,7 +120,9 @@ def validate(model, epoch,
         print("Batch validation size {0}".format(batch_size))
         print("Original image shape {0}".format(img.shape))
         print("Reconstructed image shape {0}".format(recon_uint.shape))
-        save_decoded_image(recon_uint, img, epoch, name, batch_size=batch_size)
+        save_decoded_image(recon_uint, img, epoch, name, 
+                        batch_size=batch_size,
+                        save_dir=save_dir)
         cross_corr = cross_correlation(recon, img)
         sum_square_dif = sum_square_diff(recon, img)
         loss_ = criterion(recon, img)
@@ -148,29 +149,27 @@ def train_parallel(gpu, args,
 
     torch.manual_seed(42)
     torch.cuda.set_device(gpu)
-    # model = Autoencoder()
-    model = Autoencoder(Bottleneck, DeconvBottleneck, [3, 4, 6, 3], 1).cuda(gpu)
-    # model = Autoencoder(BasicBlock, DeconvBasicBlock, [2, 2, 2, 2], 10).cuda(gpu)
-
-    # pretrained_dict = torch.load("resnet50-0676ba61.pth")
-    # model_dict = model.state_dict()
-    # 1. filter out unnecessary keys
-    # pretrained_dict = {k: v for k,
-    #                   v in pretrained_dict.items() if k in model_dict}
-    # 2. overwrite entries in the existing state dict
-    # model_dict.update(pretrained_dict)
-    # model.load_state_dict(model_dict)
+    model = Autoencoder(Bottleneck, DeconvBottleneck, [3, 4, 6, 3], 1, 
+                        latent_dim=args.latent_dim).cuda(gpu)
     
-    if args.load < 0:
-        fl = os.path.join(args.dir_checkpoint, find_last_checkpoint(args.dir_checkpoint))
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
-        model.load_state_dict(torch.load(fl, map_location=map_location))
-        print('(%i) Model loaded from %s' % (gpu, fl), flush=True)
     if args.load > 0:
-        fl = args.dir_checkpoint + 'cp_%i.pth' % args.load
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % gpu}
-        model.load_state_dict(torch.load(fl, map_location=map_location))
-        print('(%i) Model loaded from %s' % (gpu, fl), flush=True)
+        print("Loading from the checkpoint numbered from the beginning")
+        ckpt_name = "cp_{0}.pth".format(args.load)
+        state_dict = torch.load(os.path.join(args.checkpoints_dir, ckpt_name))
+        model.load_state_dict(state_dict)
+        print("The checkpoint {ckpt_name} has been loaded".format(ckpt_name=ckpt_name))
+    elif args.load < 0:
+        print("Loading from the checkpoints in {} folder numbered from the end ...".format(args.checkpoints_dir))
+        ckpt_files = os.listdir(args.checkpoints_dir)
+        print("Checkpoints names in the folder {0}".format(ckpt_files))
+        ckpt_files.sort(key=lambda x: int(''.join(re.findall(r"[0-9]", x))))
+        print("Checkpoints names sorted in the folder {0}".format(ckpt_files))
+        ckpt_name = ckpt_files[args.load]
+        state_dict = torch.load(os.path.join(args.checkpoints_dir, ckpt_name))
+        model.load_state_dict(state_dict)
+        print("The checkpoint {ckpt_name} has been loaded".format(ckpt_name=ckpt_name))
+    else:
+        pass
 
     dataset_train = Dataset(img_path_train)
     train_sampler = torch.utils.data.distributed.DistributedSampler(dataset_train, num_replicas=args.gpus, rank=gpu)
@@ -192,7 +191,9 @@ def train_parallel(gpu, args,
               # epoch1=args.load,
               batch_size=args.batch_size,
               num_epochs=args.epochs,
-              learning_rate=args.lr)
+              learning_rate=args.lr,
+              patience=args.patience,
+              latent_dim=args.latent_dim)
               # weights=args.weights)
     except KeyboardInterrupt:
         try:
@@ -217,14 +218,6 @@ trainloader = torch.utils.data.DataLoader(trainset)
 testloader = torch.utils.data.DataLoader(testset)
 
 
-# model = Autoencoder()
-# model = model.cuda(gpu)
-# make_dir()
-# outputs = train(model, trainset, testset,
-#                num_epochs=NUM_EPOCHS,
-#                batch_size=BATCH_SIZE,
-#               learning_rate=LEARNING_RATE)
-
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -248,6 +241,12 @@ def get_args():
     parser.add_argument('-D', '--dir-checkpoint', dest='checkpoints_dir', type=str, default='../../checkpoints', help='Directory with checkpoints')
     # parser.add_argument('-v', '--validation', dest='val', type=float, default=10.0,
     #                    help='Percent of the data that is used as validation (0-100)')
+    parser.add_argument('-S', '--latent-dim', dest='latent_dim', type=int, default=1024,
+                        help='Dimensionality of the latent space')
+    parser.add_argument('-P', '--patience', dest='patience', type=int, default=15,
+                        help='Max number of validations w/o improvement of the val loss for early stopping')
+    parser.add_argument('-M', '--master-port', dest='master_port', type=str, default='8888',
+                        help='The number of the master port')
     return parser.parse_args()
 
 
@@ -269,7 +268,8 @@ if __name__ == '__main__':
     args.dir_checkpoint = dir_checkpoint
 
     os.environ['MASTER_ADDR'] = 'localhost' #'127.0.0.1'  #
-    os.environ['MASTER_PORT'] = '8890'  #
+    # os.environ['MASTER_PORT'] = '8890'  #
+    os.environ['MASTER_PORT'] = args.master_port
     mp.spawn(train_parallel, nprocs=args.gpus, args=(args,))
     
     # plot_tpr_ppv(Log.last_tsv(start_name='training_'))

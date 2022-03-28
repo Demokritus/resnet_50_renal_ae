@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw
 import os
 import torchvision
 import torchvision.transforms as transforms
+from typing import *
 
 
 
@@ -24,32 +25,12 @@ def make_dir():
         os.makedirs(image_dir)
 
 
-def save_decoded_image_V0(img_out: torch.Tensor,
-                          img_src: torch.Tensor,
-                          epoch: int, name: List[str],
-                          batch_size: int = None,
-                          img_size: tuple = (256, 256)) -> None:
-    # assert batch_size == img.size(0), 'Batch size inconsistency found in validation set!!'
-    if batch_size == None:
-        batch_size = img_out.size(0)
-    elif batch_size != img_out.size(0):
-        raise Exception('Batch size inconsistency in validation set!')
-
-    for idx in range(batch_size):
-        img_out = img_out.view(batch_size, 1, *img_size)
-        # img_out = img_out[idx, 0, :, :]
-        img_src = img_src.view(batch_size, 1, *img_size)
-        # img_src = img_src[idx, 0, :, :]
-        img = torch.stack([img_src[idx, 0, :, :], img_out[idx, 0, :, :]], dim=2)
-        save_image(img, './renal_encoder_images/{0}_epoch_{1}.png'.format(name[idx], epoch))
-
-
 def save_decoded_image(img_out: torch.Tensor,
                        img_src: torch.Tensor,
                        epoch: int, name: List[str],
-                       batch_size: int = None) -> None:
-    # IMG_SIZE = (256, 256)
-    IMG_SIZE = (512, 512)
+                       batch_size: int = None,
+                       IMG_SIZE : Tuple[int,int] = (512, 512),
+                       save_dir : str = "renal_encoder_images") -> None:
     # assert batch_size == img.size(0), 'Batch size inconsistency found in validation set!!'
     if batch_size == None:
         batch_size = img_out.size(0)
@@ -73,7 +54,9 @@ def save_decoded_image(img_out: torch.Tensor,
         pic_save.paste(pic_src, (0, 0))
         pic_save.paste(sep, (512, 0))
         pic_save.paste(pic_out, (512 + 10, 0))
-        pic_save.save('./renal_encoder_images/{0}_epoch_{1}.png'.format(name[idx], epoch))
+        save_name = '{0}_epoch_{1}.png'.format(name[idx], epoch)
+        save_path = os.path.join(save_dir, save_name)
+        pic_save.save(save_path)
 
 
 def sum_square_diff(A, B):
